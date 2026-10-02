@@ -1,0 +1,10 @@
+{
+  "document": "onprem-delivery",
+  "channel": "draft",
+  "version": "draft-07cf2ae",
+  "draft": true,
+  "commit": "07cf2ae",
+  "tag": "",
+  "build_date": "2026-10-02",
+  "pipeline": "https://github.com/jslachta/onpremises-product-delivery/actions/runs/37063704759"
+}
