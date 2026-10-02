@@ -1,0 +1,384 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[czech]{babel}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage[margin=3cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{enumitem}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage[hidelinks]{hyperref}
+
+% --- prostředí pro invarianty -------------------------------------------
+% Stabilní číslování INV-01, INV-02, ... Číslo se nesmí měnit ani při
+% přeuspořádání textu -- invarianty jsou citovatelné zvenčí.
+\newcounter{invariant}
+\renewcommand{\theinvariant}{INV-\ifnum\value{invariant}<10 0\fi\arabic{invariant}}
+\newenvironment{invariant}[1]
+  {\refstepcounter{invariant}\par\medskip\noindent
+   \textbf{\theinvariant\quad #1}\par\nopagebreak\smallskip\itshape}
+  {\par\medskip}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  frame=leftline,
+  framesep=6pt,
+  xleftmargin=8pt,
+  showstringspaces=false,
+}
+
+\title{Dodávka on-premises produktu\\\large Model divergence stavu a mechanismy jeho zúžení}
+\author{Jiří Slachta}
+\date{Pracovní verze --- \today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent
+Text popisuje dodávku software provozovaného v prostředí zákazníka jako
+problém řízení divergence: rozdílu mezi skutečným stavem instance a
+představou dodavatele o tomto stavu. Ukazuje, že náklad této formy dodávky
+neroste s rychlostí vývoje, ale s počtem živých kombinací, které musí
+dodavatel obsloužit, a že většina běžně doporučovaných opatření
+(pomalá kadence, minimalizace počtu vydání) tento počet ve skutečnosti
+zvyšuje. Jádrem je model cestové závislosti stavu databáze a z něj
+odvozená sada invariantů a mechanismů.
+\end{abstract}
+
+\tableofcontents
+\bigskip
+
+% ========================================================================
+\section{Rámec}
+\label{sec:ramec}
+
+\emph{[Stub. Obsah: on-prem jako provozní režim, nikoli distribuční model.
+Rozlišení mezi tím, co skutečně zaniklo (ruční instalace bez pipeline),
+a tím, co přetrvává (regulace, OT, ekonomika stabilní zátěže, inference
+nad citlivými daty). Nákladový driver: počet živých kombinací, nikoli
+rychlost vývoje. Vyvrácení intuice, že pomalá kadence zužuje pole verzí.]}
+
+% ========================================================================
+\section{Model}
+\label{sec:model}
+
+\subsection{Dva stavy}
+
+Instance provozovaná u zákazníka má v každém okamžiku dva stavy, které
+je nutné držet odděleně.
+
+\textbf{Skutečný stav} $S$ je to, co je fyzicky v databázi a na disku:
+struktura schématu, obsah dat, přítomnost či nepřítomnost objektů, které
+tam kdo kdy vytvořil.
+
+\textbf{Evidovaný stav} $E$ je to, co si o instanci myslí dodavatel a
+co si o sobě myslí instalátor: číslo verze, obsah migračního ledgeru,
+záznamy v systémech dodavatele.
+
+V ideálním případě platí $S \equiv E$. V praxi vzniká divergence
+$D = S \setminus E$ --- množina skutečností, které v instanci platí,
+ale nikde nejsou evidované. Tato práce vychází z jediné teze:
+
+\begin{quote}
+\textbf{Selhání dodávky on-premises produktu nevzniká z chyb v kódu.
+Vzniká tehdy, když se rozhoduje podle $E$, zatímco operace působí na $S$.}
+\end{quote}
+
+Migrace napsaná proti evidovanému stavu spadne, protože je aplikována na
+stav skutečný. Rozhodnutí o vydání učiněné podle evidence o verzích v poli
+je chybné, protože pole vypadá jinak. Diagnóza vzdálené instance je chybná,
+protože se opírá o číslo verze, které nepopisuje to, co je uvnitř.
+
+Všechny mechanismy popsané v sekci~\ref{sec:mechanismy} mají jediný účel:
+zmenšit $D$, případně učinit ji pozorovatelnou dřív, než se o ni někdo
+opře.
+
+\subsection{Verze schématu není stav systému}
+\label{sub:pathdep}
+
+Většina migračních nástrojů drží jediné číslo --- kde jsem. Tím implicitně
+tvrdí, že stav je funkcí cíle:
+\[
+S = f(v)
+\]
+kde $v$ je verze schématu. Toto tvrzení je nepravdivé. Stav je funkcí
+\emph{cesty}:
+\[
+S = f\bigl(S_0,\ \langle m_1, m_2, \dots, m_n \rangle\bigr)
+\]
+kde $S_0$ je výchozí stav a $\langle m_i \rangle$ posloupnost skutečně
+aplikovaných transformací v pořadí, ve kterém proběhly.
+
+Dvě instance na téže verzi tedy nemusí být v témže stavu. Instance, která
+prošla $v_3 \to v_4 \to \dots \to v_7$, a instance, která přišla jinou
+cestou nebo některé kroky přeskočila, mají shodné $v$ a odlišné $S$.
+
+Praktický důsledek: \emph{prostor, který musí dodavatel testovat, není
+množina verzí, ale množina cest.} Ta roste podstatně rychleji a na rozdíl
+od množiny verzí není nikde evidovaná.
+
+\subsection{Konvergentní a divergentní transformace}
+
+Ne každá migrace přispívá k divergenci. Rozhodující je, zda je její
+výsledek závislý na vstupním stavu.
+
+\textbf{Konvergentní transformace} má výsledek nezávislý na $S$ i na cestě.
+Typicky čistě strukturální operace:
+
+\begin{lstlisting}
+ALTER TABLE WorkOrder ADD COLUMN ClosedAt datetime2 NULL;
+\end{lstlisting}
+
+\noindent
+Ať byla instance v jakémkoli stavu, po této operaci má sloupec. Cesty
+konvergují.
+
+\textbf{Divergentní transformace} má výsledek, který je funkcí vstupního
+stavu:
+
+\begin{lstlisting}
+UPDATE WorkOrder
+   SET ClosedAt = (SELECT MAX(ChangedAt) FROM WorkOrderLog l
+                    WHERE l.WorkOrderId = WorkOrder.Id
+                      AND l.NewState = 'Closed');
+\end{lstlisting}
+
+\noindent
+Výsledek závisí na tom, co bylo v \texttt{WorkOrderLog} v okamžiku běhu.
+Dvě instance se stejným schématem a odlišnou historií skončí s odlišnými
+daty. Cesty divergují.
+
+Hranice tedy nevede mezi \uv{malými} a \uv{velkými} migracemi, ale mezi
+těmi, které se dotýkají pouze struktury, a těmi, které se dotýkají dat.
+Každá data-touching migrace je potenciální zdroj divergence a musí být
+posuzována jinou optikou.
+
+\subsection{Podmínky bezpečnosti divergentní transformace}
+
+Data-touching migraci lze učinit bezpečnou, pokud splňuje tři podmínky
+současně.
+
+\begin{description}[leftmargin=2em,style=nextline]
+\item[Determinismus]
+Nad týmž vstupem dává týž výstup. Zejména nezávisí na čase běhu,
+na lokálním nastavení instance ani na pořadí, ve kterém databáze
+vrátila řádky.
+
+\item[Idempotence]
+Opakované spuštění nezmění výsledek. Druhý běh se dotkne nula řádků.
+
+\item[Čistota vzhledem ke vstupnímu stavu]
+Výsledek je odvoditelný výhradně z dat, která jsou v okamžiku běhu
+v databázi. Nikoli z toho, jaká byla předchozí verze aplikace nebo
+který patch instance minula.
+\end{description}
+
+Pokud transformaci nelze takto napsat, není to migrace. Je to předpoklad,
+a předpoklad patří do preflightu jako ověřovaný invariant, nikoli do
+mutační fáze.
+
+\subsection{Zdroje nedeterminismu, které projdou code review}
+\label{sub:nedeterminismus}
+
+Nedeterminismus bývá v migracích neúmyslný a vizuálně nenápadný.
+Opakující se zdroje:
+
+\begin{itemize}[leftmargin=1.4em]
+\item \textbf{Aktuální čas.} \texttt{GETDATE()} v backfillu. Migrace
+      spuštěná o rok později vyrobí jiná data než migrace spuštěná
+      v den vydání.
+\item \textbf{Konfigurace instance.} Locale, časová zóna, collation,
+      výchozí měna, výchozí jednotky. Tytéž řádky, jiný výsledek.
+\item \textbf{Objem dat v okamžiku běhu.} Zejména u transformací
+      pracujících po dávkách, kde se počet dávek propisuje do výsledku.
+\item \textbf{Nedeterministické pořadí.} \texttt{TOP} nebo \texttt{LIMIT}
+      bez úplného \texttt{ORDER BY}. Databáze nemá povinnost vrátit
+      dvakrát totéž.
+\item \textbf{Volání aplikační logiky.} Migrace, která pro výpočet
+      použije kód aplikace, je svázaná s verzí toho kódu. Ta se mění,
+      migrace zůstává.
+\end{itemize}
+
+Společný jmenovatel: všechny tyto zdroje jsou neviditelné v okamžiku,
+kdy se migrace píše, protože autor ji spouští jednou, ve svém prostředí,
+ihned.
+
+\subsection{Dvě cesty k témuž schématu}
+\label{sub:freshvsupgrade}
+
+Zvláštní případ cestové závislosti, který se projeví až po letech.
+
+Nová instalace obvykle vzniká z baseline skriptu. Existující instance
+došla řetězem migrací. Obě jsou nominálně na téže verzi a obě jsou
+funkční. Liší se v detailech, které nikoho nezajímají, dokud na ně něco
+nesáhne:
+
+\begin{itemize}[leftmargin=1.4em]
+\item jména omezení --- explicitní \texttt{PK\_WorkOrder} proti
+      autogenerovanému \texttt{PK\_\_WorkOrde\_\_3213E83F\dots}
+\item pořadí sloupců v tabulce
+\item existence indexů, které vznikly jako vedlejší efekt starší migrace
+      a v baseline nejsou
+\item \texttt{IDENTITY} seedy a mezery v číselných řadách
+\item nullability a collation na úrovni sloupce, kde se chování
+      \texttt{ALTER} liší od \texttt{CREATE}
+\end{itemize}
+
+Pak přijde migrace obsahující
+\texttt{DROP CONSTRAINT [FK\_WorkOrder\_Asset]} a selže u té poloviny pole,
+která má omezení pojmenované jinak.
+
+Tento případ je uveden zvlášť, protože je na rozdíl od ostatních
+\emph{levně a úplně automatizovatelně detekovatelný} --- viz
+sekce~\ref{sec:mechanismy}.
+
+\subsection{Latence detekce jako hlavní nákladový faktor}
+
+Divergence se neprojeví v okamžiku vzniku. Projeví se při první operaci,
+která se o porušený předpoklad opře. Mezi těmito dvěma okamžiky uplyne
+libovolně dlouhá doba.
+
+To má tři důsledky, které určují ekonomiku celé dodávky:
+
+\begin{enumerate}[leftmargin=1.6em]
+\item \textbf{Náklad opravy roste s latencí.} Divergence odhalená před
+      upgradem je konfigurační problém. Táž divergence odhalená během
+      upgradu je havárie s odstávkou. Odhalená tři měsíce po upgradu je
+      forenzní úloha nad poškozenými daty.
+\item \textbf{Příčina se s latencí ztrácí.} Po dostatečné době není
+      zjistitelné, která migrace stav porušila, protože chybí záznam
+      o tom, co bylo předtím.
+\item \textbf{Divergence se skládá.} Neopravená divergence se stává
+      vstupním stavem pro další transformace, které s ní nepočítají.
+\end{enumerate}
+
+Cílem tedy není nulová divergence --- ta je nedosažitelná. Cílem je
+\textbf{krátká latence detekce}: aby se rozpor mezi $S$ a $E$ projevil
+v okamžiku, kdy je jeho oprava levná, a nikoli v okamžiku, kdy je drahá.
+
+\subsection{Co z modelu plyne pro měřitelnost}
+
+Aby byla latence krátká, musí být divergence pozorovatelná. Z předchozích
+odstavců plynou tři veličiny, které musí být zaznamenatelné a přenositelné:
+
+\begin{description}[leftmargin=2em,style=nextline]
+\item[Cesta, nikoli verze]
+Ledger aplikovaných transformací: co, kdy, jakou verzí nástroje, s jakým
+výsledkem, s jakým otiskem skriptu v okamžiku aplikace. Otisk je nutný,
+protože skript opravený po vydání dělí pole na instance před opravou
+a po ní.
+
+\item[Otisk dat, nikoli jen schématu]
+Kontrolní součty nad klíčovými tabulkami, distribuce hodnot výčtových
+sloupců, počty porušení jednotlivých invariantů, seznam objektů v databázi,
+které nepocházejí od dodavatele.
+
+\item[Výsledek nezávislého ověření]
+Tvrzení o platnosti invariantů získané dotazem nad daty, nikoli odvozené
+z evidence o tom, že migrace proběhla.
+\end{description}
+
+Poslední bod je podstatou celého modelu. Evidence o provedení operace
+není důkazem o jejím výsledku.
+
+% ========================================================================
+\section{Invarianty}
+\label{sec:invarianty}
+
+\emph{[Stub. Číslovaná, citovatelná sada. Každý invariant: jedna věta
+tvrzení, odstavec zdůvodnění odkazující do sekce~\ref{sec:model},
+poznámka o tom, jak se ověřuje. Číslo je stabilní a nemění se při
+přeuspořádání textu.]}
+
+\begin{invariant}{Schéma se v rámci patch řady nemění.}
+\emph{[Zdůvodnění, výjimka pro aktivně destruktivní stav, způsob ověření.]}
+\end{invariant}
+
+\begin{invariant}{Data-touching migrace je deterministická, idempotentní a čistá vzhledem ke vstupnímu stavu.}
+\emph{[Odkaz na \ref{sub:nedeterminismus}. Co dělat, když to nejde napsat.]}
+\end{invariant}
+
+\begin{invariant}{Každá data-touching migrace ověřuje vlastní úplnost.}
+\emph{[Post-condition tvaru \uv{zbývá nula}, nikoli \uv{update proběhl}.]}
+\end{invariant}
+
+\begin{invariant}{Baseline a plný řetěz migrací vedou k identickému schématu.}
+\emph{[Odkaz na \ref{sub:freshvsupgrade}. Ověřuje se schema diffem v CI.]}
+\end{invariant}
+
+\begin{invariant}{Poslední patch v řadě je jediným podporovaným vstupem do dalšího majoru.}
+\emph{[Zúžení vstupní brány. Vynucuje instalátor, nikoli dokumentace.]}
+\end{invariant}
+
+\begin{invariant}{Destruktivní změna se nikdy neprovádí v jednom vydání.}
+\emph{[Expand/contract napříč verzemi. Bod bez návratu neexistuje.]}
+\end{invariant}
+
+% ========================================================================
+\section{Mechanismy}
+\label{sec:mechanismy}
+
+\emph{[Stub. Každý mechanismus explicitně uvádí, který invariant vynucuje
+a jakou divergenci zkracuje. Kandidáti:]}
+
+\begin{itemize}[leftmargin=1.4em]
+\item \emph{Rozdělení migrace na preflight a mutate.} Read-only ověření
+      předpokladů spustitelné kdykoli, i měsíce před vydáním.
+\item \emph{Expand/contract napříč vydáními.}
+\item \emph{Opravy jako idempotentní repeatable skripty} namísto položek
+      v lineárním řetězu.
+\item \emph{Konvergenční uzávěrka} na konci patch řady.
+\item \emph{Schema diff v CI} přes všechny reálné cesty.
+\item \emph{Profil instance jako telemetrie} --- tvary dat, nikoli data.
+\item \emph{Kohorty (rings)} pro postupné uvolňování.
+\end{itemize}
+
+% ========================================================================
+\section{Rozhodnutí, která zůstávají úsudkem}
+\label{sec:usudek}
+
+\emph{[Stub. Nikoli pravidla, ale vyjmenované veličiny, které se váží.
+Cílem kapitoly je odlišit úsudek nad známými veličinami od intuice.
+Kandidáti: hotfix versus odklad do nejbližšího vydání; prerekvizitní
+patch versus řešení uvnitř nového majoru; doba běhu migrace proti
+odstávkovému oknu u největší instance.]}
+
+% ========================================================================
+\section{Antipatterny}
+\label{sec:antipatterny}
+
+\emph{[Stub. Squash bez zachování řetězu pro upgrade cestu. Ruční zásah
+u zákazníka. On-prem s jedinou odchozí závislostí. Nulový počet hotfixů
+jako cíl namísto výsledku.]}
+
+% ========================================================================
+\section*{Zdroje}
+\addcontentsline{toc}{section}{Zdroje}
+
+\emph{[Reference se zapojují přímo do textu u příslušných invariantů,
+nikoli do samostatného appendixu. Nashromážděné:]}
+
+\begin{itemize}[leftmargin=1.4em]
+\item GitLab, charts/gitlab issue \#4522 --- vynucení poslední minor verze
+      předchozí série jako vstupu do nového majoru. Nezávislý doklad
+      k \theinvariant{} (viz sekce~\ref{sec:invarianty}).
+\item GitLab, container-registry issue \#1516 --- rozbitý migrační stav
+      při přeskočení post-deployment migrací.
+\item Langfuse, self-hosting docs --- schéma a migrace verzované jako
+      jeden celek; úprava schématu přesouvá odpovědnost na zákazníka.
+\item Ardent Performance, \emph{Database Schema Migrations in 2026}
+      (survey) --- srovnání přístupů u Sentry, Zulip a dalších.
+\item Tenable, \emph{Software Release Lifecycle Policy} --- kadence
+      a závazek k dostupnosti upgrade cest.
+\item Microsoft, \emph{Finance + Operations (on-premises) version update
+      policy} --- rozlišení kritických a nekritických aktualizací.
+\item R. Mironov, \emph{Product Sprawl} --- popis symptomu z produktové
+      perspektivy.
+\end{itemize}
+
+\end{document}
