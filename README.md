@@ -5,7 +5,7 @@ software provozovaného v prostředí zákazníka jako problém řízení
 divergence: rozdílu mezi skutečným stavem instance a představou dodavatele
 o tomto stavu.
 
-**[Stáhnout aktuální PDF](https://github.com/jslachta/on-prem/raw/releases/onprem-delivery.pdf)**
+**[Stáhnout aktuální PDF](https://github.com/jslachta/onpremises-product-delivery/raw/releases/onprem-delivery.pdf)**
 
 Odkaz je stabilní a vede vždy na nejnovější build z `main`. Verze je
 na titulní straně: ostré vydání nese *Verze X.Y.Z*, build mimo tag
