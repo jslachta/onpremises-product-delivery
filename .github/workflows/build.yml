@@ -1,0 +1,260 @@
+# =====================================================================
+#  GitHub Actions — Dodávka on-premises produktu (PDF dokument)
+#  Engine: pdfLaTeX.  Model převzatý z ai-rules, rozšířený o drafty.
+#
+#  Model:
+#   • PR do main: jen BUILD + ověření kompilace. PDF jako artifact
+#     (náhled pro recenzenta), do gitu se NEcommituje, nic se nepushuje.
+#   • PUSH do main (každý commit): build DRAFTU a publikace do orphan
+#     větve `releases`. GitHub Release se nevytváří.
+#   • RELEASE: jen na git TAG (SemVer vX.Y.Z). Publikuje DVĚMA cestami:
+#       1) push do orphan větve `releases`,
+#       2) GitHub Release + assety.
+#   • Ve větvi `releases` je vždy JEDEN soubor se statickým názvem
+#     `onprem-delivery.pdf` (+ .json) — přepisuje ho draft i vydání,
+#     takže permalink ukazuje vždy na nejnovější build. Draft od vydání
+#     odliší titulní strana (a pole "draft" v JSON), ne název souboru.
+#   • Verzi počítá z gitu scripts/version.sh (týž skript jako lokální
+#     make): HEAD přesně na tagu vX.Y.Z → "X.Y.Z", jinak
+#     "draft-<git describe>" (např. draft-v1.2.0-3-gabc1234).
+#     Verze se razí na titulní stranu PDF a do vedlejšího JSON.
+#
+#  Princip (záměrná redundance): orphan větev `releases` drží stabilní
+#  permalinky nezávislé na Release API. Kdyby GitHub Release zmizel nebo
+#  migrovalo se jinam, raw odkaz do větve / Pages funguje dál. GitHub
+#  Release je nadstavba, ne náhrada.
+#
+#  Oprávnění: build na PR běží jen s právem čtení. Publikace si bere
+#  contents: write — push do `releases` i Release zvládne automatický
+#  GITHUB_TOKEN, žádný PAT není třeba.
+# =====================================================================
+
+name: build
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+# Výchozí: jen čtení. Publish job si vyžádá zápis lokálně (viz níže).
+permissions:
+  contents: read
+
+env:
+  # Základ názvu výstupních souborů
+  DOC_BASENAME: onprem-delivery
+  # Hlavní TeX soubor (bez přípony)
+  TEX_MAIN: onprem-delivery
+  # TeX Live image
+  TEXLIVE_IMAGE: ghcr.io/xu-cheng/texlive-full:latest
+
+jobs:
+  # ------------------------------------------------------------------
+  #  BUILD (na pull request): ověří kompilaci, PDF jako artifact.
+  #  Žádný commit zpět, žádná publikace. Recenzent si PDF stáhne
+  #  z artifactů běhu. Verze je vždy draft (PR merge commit není na tagu).
+  # ------------------------------------------------------------------
+  build:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/xu-cheng/texlive-full:latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Celá historie + tagy → git describe spočítá verzi.
+          fetch-depth: 0
+
+      - name: Compute version (git)
+        run: |
+          # Container běží pod jiným uživatelem než vlastníkem checkoutu →
+          # git jinak hlásí "dubious ownership".
+          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+          sh scripts/version.sh version.tex >> "${GITHUB_ENV}"
+
+      - name: Generate JSON
+        run: |
+          cat > "${DOC_BASENAME}.json" <<EOF
+          {
+            "document": "${DOC_BASENAME}",
+            "version": "${VERSION}",
+            "draft": ${DRAFT},
+            "commit": "${COMMIT}",
+            "tag": "${TAG}",
+            "build_date": "${DOC_DATE}",
+            "pipeline": "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          }
+          EOF
+
+      - name: Build PDF
+        run: |
+          # dvojí běh kvůli TOC
+          pdflatex -interaction=nonstopmode -halt-on-error "${TEX_MAIN}.tex"
+          pdflatex -interaction=nonstopmode -halt-on-error "${TEX_MAIN}.tex"
+          if [ "${TEX_MAIN}" != "${DOC_BASENAME}" ]; then
+            cp "${TEX_MAIN}.pdf" "${DOC_BASENAME}.pdf"
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.DOC_BASENAME }}-${{ github.sha }}
+          path: |
+            ${{ env.DOC_BASENAME }}.pdf
+            ${{ env.DOC_BASENAME }}.json
+          retention-days: 30
+
+  # ------------------------------------------------------------------
+  #  PUBLISH (push do main = draft, tag vX.Y.Z = vydání).
+  #   • oba → releases/onprem-delivery.pdf (+ .json), statický název
+  #   • vydání navíc → řádek v index.md + GitHub Release s assety
+  # ------------------------------------------------------------------
+  publish:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/xu-cheng/texlive-full:latest
+    permissions:
+      contents: write  # push do `releases` + vytvoření Release
+    # Pushe do `releases` se nesmí předbíhat (rychlé commity za sebou,
+    # commit + tag současně). Běhy se řadí, žádný se neruší.
+    concurrency:
+      group: publish-releases-branch
+      cancel-in-progress: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Celá historie + tagy → git describe spočítá verzi.
+          fetch-depth: 0
+
+      - name: Compute version (git)
+        run: |
+          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+          sh scripts/version.sh version.tex >> "${GITHUB_ENV}"
+
+      - name: Select channel (draft / release)
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            # Na tagu musí git describe dát čisté vydání shodné s tagem.
+            if [ "${DRAFT}" != "false" ] || [ "${TAG}" != "${GITHUB_REF_NAME}" ]; then
+              echo "::error::Tag ${GITHUB_REF_NAME}, ale git describe dal ${VERSION} (tag ${TAG:-žádný})."
+              exit 1
+            fi
+            echo "CHANNEL=release" >> "${GITHUB_ENV}"
+          else
+            echo "CHANNEL=draft" >> "${GITHUB_ENV}"
+          fi
+
+      - name: Generate JSON
+        run: |
+          cat > "${DOC_BASENAME}.json" <<EOF
+          {
+            "document": "${DOC_BASENAME}",
+            "channel": "${CHANNEL}",
+            "version": "${VERSION}",
+            "draft": ${DRAFT},
+            "commit": "${COMMIT}",
+            "tag": "${TAG}",
+            "build_date": "${DOC_DATE}",
+            "pipeline": "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          }
+          EOF
+
+      - name: Build PDF
+        run: |
+          pdflatex -interaction=nonstopmode -halt-on-error "${TEX_MAIN}.tex"
+          pdflatex -interaction=nonstopmode -halt-on-error "${TEX_MAIN}.tex"
+          if [ "${TEX_MAIN}" != "${DOC_BASENAME}" ]; then
+            cp "${TEX_MAIN}.pdf" "${DOC_BASENAME}.pdf"
+          fi
+
+      # ----------------------------------------------------------------
+      #  Publikace 1/2 — orphan větev `releases`.
+      #  Stabilní permalinky nezávislé na Release API; použitelné i jako
+      #  zdroj pro GitHub Pages.
+      # ----------------------------------------------------------------
+      - name: Publish to orphan branch `releases`
+        run: |
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name  "github-actions[bot]"
+
+          AUTH_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+
+          # Vygenerované výstupy stranou (mimo working tree), ať checkout
+          # `releases` neselže na kolizi se stejnojmennými soubory.
+          STAGE="$(mktemp -d)"
+          cp "${DOC_BASENAME}.pdf"  "${STAGE}/"
+          cp "${DOC_BASENAME}.json" "${STAGE}/"
+
+          if git ls-remote --exit-code --heads "${AUTH_URL}" releases >/dev/null 2>&1; then
+            git fetch "${AUTH_URL}" releases
+            git checkout -f -B releases FETCH_HEAD
+          else
+            echo "Větev releases neexistuje — zakládám jako orphan."
+            git checkout --orphan releases
+            git rm -rf . >/dev/null 2>&1 || true
+          fi
+          # Zbytky buildu z main (aux, log, version.tex…) do releases nepatří.
+          git clean -fdx >/dev/null
+
+          # Vrať výstupy na místo (přepíše předchozí → statický název).
+          cp "${STAGE}/${DOC_BASENAME}.pdf"  "${DOC_BASENAME}.pdf"
+          cp "${STAGE}/${DOC_BASENAME}.json" "${DOC_BASENAME}.json"
+
+          # Úklid souborů s jiným než statickým názvem, kdyby někde zůstaly.
+          git rm -f --ignore-unmatch "${DOC_BASENAME}-"*.pdf "${DOC_BASENAME}-"*.json >/dev/null 2>&1 || true
+
+          # Historie vydání (jen ostrá vydání, drafty ne).
+          if [ "${CHANNEL}" = "release" ]; then
+            grep -q "^- v${VERSION} " index.md 2>/dev/null || \
+              echo "- v${VERSION} — ${DOC_DATE} — ${COMMIT}" >> index.md
+          fi
+          touch index.md
+
+          # index.html je odvozený soubor — generuje se při každé publikaci.
+          cat > index.html <<EOF
+          <!doctype html><meta charset="utf-8">
+          <title>${DOC_BASENAME} — releases</title>
+          <h1>${DOC_BASENAME}</h1>
+          <p>Aktuální verze: <strong>${VERSION}</strong> (commit ${COMMIT}, ${DOC_DATE})</p>
+          <ul>
+            <li><a href="${DOC_BASENAME}.pdf">${DOC_BASENAME}.pdf</a> — dokument</li>
+            <li><a href="${DOC_BASENAME}.json">${DOC_BASENAME}.json</a> — metadata</li>
+          </ul>
+          <p>Přehled ostrých vydání viz <a href="index.md">index.md</a>,
+          konkrétní vydání jsou i v GitHub Releases.</p>
+          EOF
+          # .nojekyll: ať Pages servíruje soubory tak, jak jsou.
+          touch .nojekyll
+
+          # -f: PDF je v .gitignore (*.pdf) kvůli main, tady ho chceme.
+          git add -f "${DOC_BASENAME}.pdf" "${DOC_BASENAME}.json"
+          git add index.md index.html .nojekyll
+          if git diff --cached --quiet; then
+            echo "Beze změny — není co publikovat."
+            exit 0
+          fi
+          git commit -m "${CHANNEL}: ${DOC_BASENAME} ${VERSION}"
+          git push "${AUTH_URL}" HEAD:releases
+          echo "Publikováno do větve releases: ${DOC_BASENAME}.pdf (${VERSION})."
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ----------------------------------------------------------------
+      #  Publikace 2/2 — GitHub Release + assety (jen na tag).
+      # ----------------------------------------------------------------
+      - name: Create GitHub Release with assets
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          fail_on_unmatched_files: true
+          files: |
+            ${{ env.DOC_BASENAME }}.pdf
+            ${{ env.DOC_BASENAME }}.json

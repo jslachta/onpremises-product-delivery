@@ -1,0 +1,2 @@
+# Skripty se spouštějí v Linuxovém kontejneru CI — vždy LF.
+*.sh text eol=lf

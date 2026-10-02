@@ -31,9 +31,23 @@
   showstringspaces=false,
 }
 
+% --- verze dokumentu ----------------------------------------------------
+% version.tex generuje scripts/version.sh z gitu (make, CI). Na tagu vX.Y.Z
+% je to vydání, jinak draft. Bez version.tex (přímý pdflatex mimo make)
+% se dokument označí jako lokální draft.
+\newif\ifdocdraft
+\IfFileExists{version.tex}{\input{version.tex}}{%
+  \docdrafttrue
+  \def\docversion{draft-local}%
+  \def\doccommit{---}%
+  \def\docdate{\today}}
+
 \title{Dodávka on-premises produktu\\\large Model divergence stavu a mechanismy jeho zúžení}
 \author{Jiří Slachta}
-\date{Pracovní verze --- \today}
+\date{%
+  \ifdocdraft\textbf{Pracovní verze (draft)}\else Verze \docversion\fi\\[2pt]
+  \small\ifdocdraft\texttt{\docversion} --- \fi
+  commit \texttt{\doccommit} --- \docdate}
 
 \begin{document}
 \maketitle

@@ -1,0 +1,12 @@
+# Výstupy sazby — PDF žije jen ve větvi `releases`, ne v main.
+*.pdf
+*.aux
+*.log
+*.out
+*.toc
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+
+# Generuje scripts/version.sh (make / CI).
+version.tex
